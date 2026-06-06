@@ -4,7 +4,7 @@ from sentence_transformers import SentenceTransformer
 
 
 class Embedder:
-    """Wraps a sentence-transformers model to produce embeddings."""
+    """Wraps a sentence-transformers model to produce embeddings. Lets see if it works."""
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model_name = model_name
