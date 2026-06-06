@@ -1,0 +1,14 @@
+langchain
+langchain-community
+anthropic
+faiss-cpu
+sentence-transformers
+streamlit
+python-dotenv
+pandas
+requests
+torch
+torchvision
+Pillow
+efficientnet-pytorch
+scikit-learn
