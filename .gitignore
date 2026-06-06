@@ -1,1 +1,16 @@
+#This is where API keys live
+.env
+
+#Python compiled files no point tracking can reproduce by running code again
 __pycache__/
+*.pyc
+
+#Contains trained model which are large and git can not store so much.
+*.pth
+
+#Data folder which are a waste of space again can be reproduced by running code again.
+data/raw
+data/processed
+
+#Virtual envir will contain lots of libraries installed can reproduce by pip install -r requirements.txt again.
+.venv/
