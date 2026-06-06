@@ -1,5 +1,1 @@
-.env
 __pycache__/
-*.pth
-data/raw/
-data/processed/
