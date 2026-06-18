@@ -1,3 +1,5 @@
+# TODO: Fix cases where some food items return N/A for calories
+
 """Fetch nutrition details for common food items from the USDA FoodData Central API.
 
 For each food item this script:
