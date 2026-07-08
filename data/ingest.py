@@ -1,5 +1,7 @@
 # TODO: Fix cases where some food items return N/A for calories
 #TODO: Add claude API to handle adding descriptions so fallback food can get descriptions too
+#TODO: Handle cache exipration as well.
+#TODO: Add data from the DGA.pdf (low priority)
 """Fetch nutrition details for common food items from the USDA FoodData Central API.
 
 For each food item this script:
