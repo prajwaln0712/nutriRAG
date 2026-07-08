@@ -1,5 +1,5 @@
 # TODO: Fix cases where some food items return N/A for calories
-
+#TODO: Add claude API to handle adding descriptions so fallback food can get descriptions too
 """Fetch nutrition details for common food items from the USDA FoodData Central API.
 
 For each food item this script:
