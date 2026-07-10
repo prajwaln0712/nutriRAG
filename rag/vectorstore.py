@@ -122,26 +122,27 @@ class VectorStore:
         return results
 
 
-def _smoke_test():
-    """Build the index from the food JSON (description + details) and search."""
-    store = VectorStore()
-    if os.path.exists(DEFAULT_FOOD_JSON_PATH):
-        store.build_from_food_json()
-    else:
-        # Fallback samples if the food JSON has not been generated yet.
-        store.build([
-            "Apple has 52 calories and 14 g of carbs.",
-            "Chicken breast has 165 calories and 20 g of protein.",
-            "Almonds have 600 calories and 50 g of fats.",
-        ])
-    print(f"Built index with {store.index.ntotal} vectors; saved to disk.")
-
-    # Search with a fresh store to prove it loads from disk.
-    results = VectorStore().search("food items used commonly for baking", k=5)
-    print("Top matches for 'food items used commonly for baking':")
-    for r in results:
-        print(f"  {r['cosine_similarity']:.3f}  {r['text']}")
-
+# def _smoke_test():
+#     """Build the index from the food JSON (description + details) and search."""
+#     store = VectorStore()
+#     if os.path.exists(DEFAULT_FOOD_JSON_PATH):
+#         store.build_from_food_json()
+#     else:
+#         # Fallback samples if the food JSON has not been generated yet.
+#         store.build([
+#             "Apple has 52 calories and 14 g of carbs.",
+#             "Chicken breast has 165 calories and 20 g of protein.",
+#             "Almonds have 600 calories and 50 g of fats.",
+#         ])
+#     print(f"Built index with {store.index.ntotal} vectors; saved to disk.")
+#
+#     # Search with a fresh store to prove it loads from disk.
+#     results = VectorStore().search("food items which are meat", k=5)
+#     print("Top matches for 'food items which are meat':")
+#     for r in results:
+#         print(f"  {r['cosine_similarity']:.3f}  {r['text']}")
+#
 
 if __name__ == "__main__":
-    _smoke_test()
+    pass
+    # _smoke_test()
