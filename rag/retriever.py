@@ -74,22 +74,23 @@ class Retriever:
         return {"source": "usda", "results": lookup}
 
 
-def _smoke_test():
-    """Demonstrate an index hit (no network). The fallback path hits USDA."""
-    retriever = Retriever()
-
-    query = "pizza"
-    result = retriever.retrieve(query, k=3)
-    print(f"Query: {query!r}  ->  source: {result['source']}")
-    if result["source"] == "index":
-        for m in result["results"]:
-            print(f"  {m['cosine_similarity']:.3f}  {m['text'][:60]}...")
-
-    # To test the fallback, try an out-of-domain query such as:
-    #   retriever.retrieve("dragon fruit")
-    # That triggers a live USDA call, appends to food_item_list.json, and
-    # rebuilds the FAISS index.
+# def _smoke_test():
+#     """Demonstrate an index hit (no network). The fallback path hits USDA."""
+#     retriever = Retriever()
+#
+#     query = "high protein meat"
+#     result = retriever.retrieve(query, k=3)
+#     print(f"Query: {query!r}  ->  source: {result['source']}")
+#     if result["source"] == "index":
+#         for m in result["results"]:
+#             print(f"  {m['cosine_similarity']:.3f}  {m['text'][:60]}...")
+#
+#     # To test the fallback, try an out-of-domain query such as:
+#     #   retriever.retrieve("dragon fruit")
+#     # That triggers a live USDA call, appends to food_item_list.json, and
+#     # rebuilds the FAISS index.
 
 
 if __name__ == "__main__":
-    _smoke_test()
+    pass
+    # _smoke_test()
