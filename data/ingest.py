@@ -71,7 +71,7 @@ DGA_SOURCE = "Dietary Guidelines for Americans, 2025"
 
 # Chunking configuration for the DGA markdown.
 DGA_SKIP_PAGES = 2       # skip the cover page and the Secretaries' foreword
-DGA_CHUNK_SIZE = 1000    # max chars per chunk before an oversized section is sub-split
+DGA_CHUNK_SIZE = 1000  # max chars per chunk before an oversized section is sub-split
 DGA_CHUNK_OVERLAP = 100  # chars repeated between adjacent sub-chunks
 # Markdown header levels to split sections on (the DGA uses ### and #### mostly).
 DGA_HEADERS = [
