@@ -17,80 +17,110 @@ if _BASE_DIR not in sys.path:
     sys.path.insert(0, _BASE_DIR)
 
 try:
-    from rag.vectorstore import VectorStore
+    from rag.vectorstore import VectorStore, DGA_INDEX_PATH, DGA_MAPPING_PATH
 except ImportError:
-    from vectorstore import VectorStore
+    from vectorstore import VectorStore, DGA_INDEX_PATH, DGA_MAPPING_PATH
 
 # The live USDA fallback - fetches a food and updates food_item_list.json.
 from data.ingest import lookup_food_item
 
 
 # Matches scoring below this cosine similarity are treated as "not relevant".
-DEFAULT_THRESHOLD = 0.29
+DEFAULT_THRESHOLD = 0.57
 
 
 class Retriever:
-    """Retrieves food info from the index, falling back to a live USDA lookup."""
+    """Retrieves food/guidance info from two indexes, with a live USDA fallback."""
 
-    def __init__(self, vectorstore=None, threshold=DEFAULT_THRESHOLD):
-        # The vector store handles embedding the query and loading the index.
-        self.vectorstore = vectorstore or VectorStore()
+    def __init__(self, food_store=None, dga_store=None, threshold=DEFAULT_THRESHOLD):
+        # Two vector stores: USDA food facts and DGA guidance text.
+        self.food_store = food_store or VectorStore()
+        self.dga_store = dga_store or VectorStore(
+            index_path=DGA_INDEX_PATH, mapping_path=DGA_MAPPING_PATH
+        )
         self.threshold = threshold
+
+    def _search_dga(self, query, k):
+        """Search the DGA index, returning [] if it has not been built yet."""
+        try:
+            return self.dga_store.search(query, k=k)
+        except (FileNotFoundError, RuntimeError):
+            # The DGA index files do not exist yet - degrade gracefully.
+            return []
 
     def retrieve(self, query, k=5):
         """Return relevant index matches, or a live USDA lookup result.
 
-        Searches the FAISS index and keeps matches whose cosine similarity is
-        at or above the threshold. If at least one qualifies, those are
-        returned. Otherwise a live USDA lookup is triggered (which updates
-        food_item_list.json), the FAISS index is rebuilt, and the lookup
+        Searches both the food and DGA indexes and keeps matches whose cosine
+        similarity is at or above the threshold. If at least one qualifies, the
+        top-k are returned. Otherwise a live USDA lookup is triggered (which
+        updates food_item_list.json), the food index is rebuilt, and the lookup
         result is returned.
 
-        Returns a dict: {"source": "index" | "usda", "results": ...}.
+        Returns a dict: {"mode_of_retreive": "pre_built_idx" | "usda", "results": ...}.
+        The top-level "mode_of_retreive" is the retrieval path (a pre-built index
+        vs a live USDA lookup); each result carries its own "source" (USDA vs DGA).
         """
-        # Search the vector store (embeds the query, loads the index from disk).
-        matches = self.vectorstore.search(query, k=k)
+        # Search both indexes (each embeds the query and loads its own index).
+        matches = self.food_store.search(query, k=k) + self._search_dga(query, k=k)
 
-        # Keep only the matches at or above the relevance threshold.
+        # Keep matches at/above the threshold, best first, capped at k.
         relevant = [m for m in matches if m["cosine_similarity"] >= self.threshold]
+        relevant.sort(key=lambda m: m["cosine_similarity"], reverse=True)
+        relevant = relevant[:k]
 
-        # Relevant results found in the index - return them.
+        # Relevant results found in either index - return them.
         if relevant:
-            return {"source": "index", "results": relevant}
+            return {"mode_of_retreive": "pre_built_idx", "results": relevant}
 
         # Nothing relevant enough -> live USDA lookup, which updates the JSON.
         print(f"No index match >= {self.threshold:.3f} for '{query}'; "
               f"falling back to a live USDA lookup...")
         lookup = lookup_food_item(query)
 
-        # A dict means a valid food was returned (and the JSON may have a new
-        # entry). Rebuild the index so the new item is searchable next time.
-        # A string ("Sorry network error" / "Did not find any such food item")
-        # or None means nothing was added, so there is nothing to rebuild.
+        # Normalize the USDA result into the SAME shape as the index results:
+        # a list of dicts with "text", "source", "ref" and "cosine_similarity".
         if isinstance(lookup, dict):
+            # Valid food (JSON may have a new entry): rebuild the food index so
+            # it is searchable next time, expose the description as `text`, and
+            # treat the direct lookup as an exact match (cosine similarity 1.0).
             print("Rebuilding the FAISS index with the updated food list...")
-            self.vectorstore.build_from_food_json()
+            self.food_store.build_from_food_json()
+            results = [{
+                "text": lookup.get("description", ""),
+                "source": "USDA FoodData Central",
+                "ref": lookup.get("query", ""),
+                "cosine_similarity": 1.0,
+            }]
+        else:
+            # A string message or None (network failure / not found): no match.
+            results = [{
+                "text": "Sorry could not find any data",
+                "source": "",
+                "ref": "",
+                "cosine_similarity": 0.0,
+            }]
 
-        return {"source": "usda", "results": lookup}
+        return {"mode_of_retreive": "usda", "results": results}
 
 
-# def _smoke_test():
-#     """Demonstrate an index hit (no network). The fallback path hits USDA."""
-#     retriever = Retriever()
-#
-#     query = "high protein meat"
-#     result = retriever.retrieve(query, k=3)
-#     print(f"Query: {query!r}  ->  source: {result['source']}")
-#     if result["source"] == "index":
-#         for m in result["results"]:
-#             print(f"  {m['cosine_similarity']:.3f}  {m['text'][:60]}...")
-#
-#     # To test the fallback, try an out-of-domain query such as:
-#     #   retriever.retrieve("dragon fruit")
-#     # That triggers a live USDA call, appends to food_item_list.json, and
-#     # rebuilds the FAISS index.
+def _smoke_test():
+    """Demonstrate an index hit (no network). The fallback path hits USDA."""
+    retriever = Retriever()
+
+    query = "What should I look out for in snack food"
+    result = retriever.retrieve(query, k=10)
+    print(f"Query: {query!r}  ->  mode_of_retreive: {result['mode_of_retreive']}")
+    if result["mode_of_retreive"] == "pre_built_idx":
+        for m in result["results"]:
+            print(f"  {m['cosine_similarity']:.3f}  {m['text'][:60]}...")
+
+    # To test the fallback, try an out-of-domain query such as:
+    #   retriever.retrieve("dragon fruit")
+    # That triggers a live USDA call, appends to food_item_list.json, and
+    # rebuilds the FAISS index.
 
 
 if __name__ == "__main__":
-    pass
-    # _smoke_test()
+    # pass
+    _smoke_test()
