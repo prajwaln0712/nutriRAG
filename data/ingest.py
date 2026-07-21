@@ -17,9 +17,20 @@ case where the API key has run out of its request quota (rate limit).
 
 import os                       # used to read environment variables and build file paths
 import sys                      # used to read the food name from the command line
+import re                       # used to clean headers and HTML comments in DGA markdown
 import json                     # used to write/read the JSON results file
 import requests                 # used to make HTTP calls to the USDA API
+import anthropic                # used to extract the food name from a question
+import pymupdf4llm              # used to extract the DGA PDF as structured Markdown
 from dotenv import load_dotenv  # used to load variables defined in the .env file
+
+# Make the project root importable so `utils.prompts` resolves when this file is
+# run directly (`python data/ingest.py`) as well as when imported as a module.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BASE_DIR not in sys.path:
+    sys.path.insert(0, _BASE_DIR)
+
+from utils.prompts import FOOD_NAME_EXTRACTION_PROMPT
 
 
 # A small custom exception so callers can tell a network failure apart from a
@@ -48,6 +59,24 @@ WHOLE_FOODS = {
     "Almonds", "Salmon", "Spinach", "Potato", "Carrot", "Lentils",
     "Tomato", "Avocado",
 }
+
+# The Claude model used for the small food-name extraction call.
+EXTRACTION_MODEL = "claude-sonnet-4-6"
+
+# The Dietary Guidelines for Americans PDF and where its extracted text is saved.
+DGA_PDF_PATH = os.path.join(_BASE_DIR, "data", "raw", "DGA.pdf")
+DGA_MD_PATH = os.path.join(_BASE_DIR, "data", "processed", "dga.md")
+DGA_JSON_PATH = os.path.join(_BASE_DIR, "data", "processed", "dga_data.json")
+DGA_SOURCE = "Dietary Guidelines for Americans, 2025"
+
+# Chunking configuration for the DGA markdown.
+DGA_SKIP_PAGES = 2       # skip the cover page and the Secretaries' foreword
+DGA_CHUNK_SIZE = 1000    # max chars per chunk before an oversized section is sub-split
+DGA_CHUNK_OVERLAP = 100  # chars repeated between adjacent sub-chunks
+# Markdown header levels to split sections on (the DGA uses ### and #### mostly).
+DGA_HEADERS = [
+    ("#", "h1"), ("##", "h2"), ("###", "h3"), ("####", "h4"), ("#####", "h5"),
+]
 
 # The USDA response labels each nutrient with a name. We map the USDA nutrient
 # names to the short keys we want to keep in our output.
@@ -191,7 +220,7 @@ def fetch_food(query, api_key):
     nutrients = extract_nutrients(food)
 
     # Assemble the per-food result, including the readable description.
-    return {
+    return {    
         "query": query,
         "food_name": food.get("description", query),
         "calories": nutrients["calories"],
@@ -199,7 +228,7 @@ def fetch_food(query, api_key):
         "carbs": nutrients["carbs"],
         "fat": nutrients["fat"],
         "fibre": nutrients["fibre"],
-        "description": build_sentence(query, nutrients),
+        "description": build_sentence(food.get("description", query), nutrients),
     }
 
 
@@ -225,6 +254,88 @@ def save_results(results, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
+
+
+def _clean_header(text):
+    """Strip markdown emphasis (*, _) and collapse whitespace in a header."""
+    return re.sub(r"\s+", " ", text.replace("*", "").replace("_", "")).strip()
+
+
+def extract_dga(pdf_path=DGA_PDF_PATH, md_path=DGA_MD_PATH, output_path=DGA_JSON_PATH):
+    """Extract the DGA PDF, chunk it by section, and save records to JSON.
+
+    Steps:
+      1. Extract per-page Markdown with pymupdf4llm (headings preserved).
+      2. Write the full Markdown to dga.md for inspection.
+      3. Skip the cover + Secretaries' foreword (first DGA_SKIP_PAGES pages).
+      4. Split each remaining page by its Markdown headers, sub-splitting any
+         oversized section, and prefix each chunk with its header path so the
+         embedding captures the topic even when the body does not name it.
+      5. Save {text, source, ref} records to dga_data.json.
+    """
+    # Imported lazily so the USDA-only paths do not pay LangChain's import cost.
+    from langchain_text_splitters import (
+        MarkdownHeaderTextSplitter,
+        RecursiveCharacterTextSplitter,
+    )
+
+    print(f"Extracting '{os.path.basename(pdf_path)}' to Markdown...")
+
+    # Per-page Markdown. use_ocr=False skips Tesseract OCR on image regions - the
+    # DGA is digital text, so OCR is both unnecessary and unavailable here.
+    pages = pymupdf4llm.to_markdown(pdf_path, use_ocr=False, page_chunks=True)
+
+    # Write the full Markdown (all pages) for inspection.
+    os.makedirs(os.path.dirname(md_path), exist_ok=True)
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(page["text"] for page in pages))
+
+    # Header split is primary; the size splitter only sub-splits big sections.
+    header_splitter = MarkdownHeaderTextSplitter(DGA_HEADERS, strip_headers=True)
+    size_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=DGA_CHUNK_SIZE, chunk_overlap=DGA_CHUNK_OVERLAP
+    )
+
+    records = []
+    # pymupdf's page metadata is unreliable here, so the 1-based list position is
+    # the page number (pages come back in document order).
+    for page_number, page in enumerate(pages, start=1):
+        # Skip the cover page and the Secretaries' foreword.
+        if page_number <= DGA_SKIP_PAGES:
+            continue
+
+        # Drop the HTML picture-text comments before splitting.
+        markdown = re.sub(r"<!--.*?-->", "", page["text"], flags=re.S)
+
+        # Split the page into sections at its Markdown headers.
+        for section in header_splitter.split_text(markdown):
+            body = section.page_content.strip()
+            if not body:
+                continue
+
+            # Build a readable header path, e.g. "Special Populations > Adolescence".
+            titles = [_clean_header(v) for v in section.metadata.values() if v]
+            header_path = " > ".join(titles)
+            # The deepest header is the section title shown in the citation ref.
+            section_title = titles[-1] if titles else "General"
+            ref = f"{section_title} (p.{page_number})"
+
+            # Size guard: sub-split oversized sections; prefix each chunk with its
+            # header path so the vector reflects the section topic.
+            pieces = size_splitter.split_text(body) if len(body) > DGA_CHUNK_SIZE else [body]
+            for piece in pieces:
+                text = f"{header_path}: {piece}" if header_path else piece
+                records.append({
+                    "text": text,
+                    "source": DGA_SOURCE,
+                    "ref": ref,
+                })
+
+    # Persist the chunks with the shared JSON writer.
+    save_results(records, output_path)
+    print(f"Done. Saved {len(records)} chunk(s) to {output_path} "
+          f"(skipped the first {DGA_SKIP_PAGES} page(s)).")
+    return records
 
 
 def add_food_if_missing(name, results, api_key):
@@ -261,6 +372,44 @@ def add_food_if_missing(name, results, api_key):
     return "added", result
 
 
+def extract_food_name(question, client=None):
+    """Use Claude to pull just the food item name out of a user question.
+
+    "what are the values in sapodilla" -> "sapodilla". Single-word input is
+    already a food name, so it is returned as-is without an API call. Returns
+    None if the question names no food, or if the API call fails.
+    """
+    question = question.strip()
+
+    # A single word is already just the food name - no Claude call needed.
+    if len(question.split()) == 1:
+        return question
+
+    client = client or anthropic.Anthropic()
+
+    try:
+        response = client.messages.create(
+            model=EXTRACTION_MODEL,
+            max_tokens=20,  # a food name is only a few tokens
+            messages=[{
+                "role": "user",
+                "content": FOOD_NAME_EXTRACTION_PROMPT.format(question=question),
+            }],
+        )
+    except anthropic.APIError as exc:
+        print(f"  [ERROR] Could not extract the food name: {exc}")
+        return None
+
+    name = next(
+        (block.text for block in response.content if block.type == "text"), ""
+    ).strip()
+
+    # The model replies with NONE when the question mentions no food.
+    if not name or name.upper() == "NONE":
+        return None
+    return name
+
+
 def lookup_food_item(user_input, api_key=None):
     """Look up a single food item the user typed (the fallback path).
 
@@ -277,11 +426,17 @@ def lookup_food_item(user_input, api_key=None):
             print("[FATAL] USDA_API_KEY not found. Check your .env file.")
             return None
 
-    # Clean up the typed name; bail out if it is empty.
-    name = user_input.strip()
-    if not name:
+    # The input may be a full question ("what are the values in sapodilla"), so
+    # extract just the food name. Passing the whole sentence to the USDA lookup
+    # would store the sentence itself as the food's name in the JSON.
+    if not user_input.strip():
         print("[WARN] No food item entered.")
         return None
+
+    name = extract_food_name(user_input)
+    if not name:
+        print("[WARN] Could not identify a food item in the input.")
+        return "Did not find any such food item"
 
     # Read the saved results so we can both de-duplicate and update them.
     output_path = get_output_path()
@@ -371,9 +526,12 @@ def ingest():
 
 
 if __name__ == "__main__":
+    # With "--dga"             -> extract the DGA PDF into dga_data.json.
     # With a food name argument -> look up that single item (fallback path).
     # With no arguments        -> fetch the full default list.
-    if len(sys.argv) > 1:
+    if len(sys.argv) > 1 and sys.argv[1] == "--dga":
+        extract_dga()
+    elif len(sys.argv) > 1:
         lookup_food_item(" ".join(sys.argv[1:]))
     else:
         ingest()
