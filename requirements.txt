@@ -7,6 +7,7 @@ streamlit
 python-dotenv
 pandas
 requests
+pymupdf4llm
 torch
 torchvision
 Pillow
